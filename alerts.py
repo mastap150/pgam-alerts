@@ -4,15 +4,8 @@ Smart threshold-based alerts for Slack
 All 20 alert types implemented
 """
 
-import sys
-import os
 from datetime import datetime, timedelta
-
-# Add parent directory to path to import from pgam_v2
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'pgam_v2'))
-
-from api import fetch
-from utils import sf, pct, n_days_ago
+from api import fetch, sf, pct, n_days_ago
 from thresholds import CRITICAL, IMPORTANT, GROWTH, DISCOVERIES, COOLDOWN, PRIORITY
 from alert_history import should_fire_alert, record_alert, cleanup_old_history
 from delivery_alerts import send_alert, send_grouped_alerts, format_currency, format_percentage
@@ -558,10 +551,12 @@ def check_premium_ecpm():
 # MAIN ALERT RUNNER
 # ============================================================================
 
-def run_tier(tier):
+def run_tier(tier, debug=False):
     """Run alerts for specified tier"""
     print(f"\n{'='*60}")
     print(f"  PGAM Alert System - {tier.upper()} Tier")
+    if debug:
+        print(f"  🧪 DEBUG MODE - Alerts will NOT be sent to Slack")
     print(f"  {datetime.now().strftime('%Y-%m-%d %I:%M %p ET')}")
     print(f"{'='*60}\n")
     
@@ -617,14 +612,25 @@ def run_tier(tier):
     if all_alerts:
         print(f"✅ {len(all_alerts)} alerts detected")
         
-        # Group if many alerts
-        if len(all_alerts) > COOLDOWN["max_alerts_per_run"]:
-            print(f"⚠️  Grouping alerts (>{COOLDOWN['max_alerts_per_run']} detected)")
-            send_grouped_alerts(all_alerts[:COOLDOWN["max_alerts_per_run"]])
-        else:
-            # Send individually
+        if debug:
+            print(f"\n🧪 DEBUG MODE - Showing alerts but NOT sending to Slack:\n")
             for alert in all_alerts:
-                send_alert(alert)
+                print(f"\n{alert['priority_icon']} {alert['type']}")
+                print(f"  Title: {alert['title']}")
+                for detail in alert.get('details', []):
+                    print(f"  • {detail}")
+                if 'action' in alert:
+                    print(f"  Action: {alert['action']}")
+            print(f"\n✅ Would have sent {len(all_alerts)} alerts to Slack (skipped in debug mode)")
+        else:
+            # Group if many alerts
+            if len(all_alerts) > COOLDOWN["max_alerts_per_run"]:
+                print(f"⚠️  Grouping alerts (>{COOLDOWN['max_alerts_per_run']} detected)")
+                send_grouped_alerts(all_alerts[:COOLDOWN["max_alerts_per_run"]])
+            else:
+                # Send individually
+                for alert in all_alerts:
+                    send_alert(alert)
     else:
         print("✅ No alerts detected - all systems normal")
     
@@ -636,7 +642,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PGAM Alert System")
     parser.add_argument("--tier", choices=["critical", "important", "opportunities", "discoveries"], 
                        required=True, help="Alert tier to run")
+    parser.add_argument("--debug", action="store_true", 
+                       help="Debug mode - show alerts but don't send to Slack")
     
     args = parser.parse_args()
     
-    run_tier(args.tier)
+    run_tier(args.tier, debug=args.debug)
