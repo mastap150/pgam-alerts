@@ -1,2 +1,2 @@
 # PGAM Alert System Requirements
-# No external dependencies needed - uses only Python stdlib
+requests>=2.31.0
