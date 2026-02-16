@@ -1,0 +1,2 @@
+# PGAM Alert System Requirements
+# No external dependencies needed - uses only Python stdlib
