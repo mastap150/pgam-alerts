@@ -25,10 +25,19 @@ def get_today():
 # ============================================================================
 
 def check_revenue_crash():
-    """Alert #1: Revenue down >30% vs yesterday same hour"""
+    """Alert #1: Revenue down >30% vs yesterday same hour (only if hour is >50% complete)"""
     alerts = []
     today_str = get_today()
     yesterday_str, current_hour = get_yesterday_same_hour()
+    
+    # Get current time to check if hour is substantially complete
+    now = datetime.now()
+    minutes_into_hour = now.minute
+    
+    # Only check if we're at least 30 minutes into the hour
+    # This prevents false alarms at the start of each hour
+    if minutes_into_hour < 30:
+        return alerts  # Too early in the hour to compare
     
     # Get current hour data
     today_hourly = fetch("HOUR", ["GROSS_REVENUE"], today_str, today_str)
@@ -54,7 +63,9 @@ def check_revenue_crash():
     if yesterday_rev > 0:
         drop_pct = ((today_rev - yesterday_rev) / yesterday_rev) * 100
         
-        if drop_pct < -CRITICAL["revenue_crash_pct"]:
+        # Only alert if drop is significant AND today's revenue is meaningfully low
+        # Added condition: today must be <$20/hour to avoid false alarms during slow starts
+        if drop_pct < -CRITICAL["revenue_crash_pct"] and today_rev < 20:
             if should_fire_alert("revenue_crash", "system"):
                 alerts.append({
                     'type': 'Revenue Crash',
@@ -64,7 +75,8 @@ def check_revenue_crash():
                     'details': [
                         f"Current hour: {format_currency(today_rev)} ({format_percentage(drop_pct)} vs yesterday)",
                         f"Expected: {format_currency(yesterday_rev)}",
-                        f"Lost revenue: {format_currency(yesterday_rev - today_rev)}/hour"
+                        f"Lost revenue: {format_currency(yesterday_rev - today_rev)}/hour",
+                        f"Time: {minutes_into_hour} minutes into hour {current_hour}"
                     ],
                     'action': 'Check top publishers + demand partners immediately'
                 })
@@ -547,6 +559,112 @@ def check_premium_ecpm():
     
     return alerts
 
+def check_new_apps_detected():
+    """Alert #21: New apps/bundles detected today"""
+    alerts = []
+    today_str = get_today()
+    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    # Get today's apps
+    today_apps = fetch("BUNDLE", ["GROSS_REVENUE"], today_str, today_str)
+    yesterday_apps = fetch("BUNDLE", ["GROSS_REVENUE"], yesterday_str, yesterday_str)
+    
+    # Build yesterday lookup
+    yesterday_bundles = {r.get("BUNDLE", "").strip() for r in yesterday_apps}
+    
+    # Find new apps
+    new_apps = []
+    for app in today_apps:
+        bundle = app.get("BUNDLE", "").strip()
+        if not bundle:
+            continue
+        
+        revenue = sf(app.get("GROSS_REVENUE", 0))
+        
+        # New app = not in yesterday's data AND making money today
+        if bundle not in yesterday_bundles and revenue > DISCOVERIES["new_app_alert_min"]:
+            new_apps.append({
+                'bundle': bundle,
+                'revenue': revenue
+            })
+    
+    # Alert if we have new apps
+    if len(new_apps) >= DISCOVERIES["new_inventory_count"]:
+        if should_fire_alert("new_apps_detected", "system"):
+            # List top 5 by revenue
+            top_new = sorted(new_apps, key=lambda x: x['revenue'], reverse=True)[:5]
+            app_list = [f"{a['bundle'][:30]} ({format_currency(a['revenue'])})" for a in top_new]
+            
+            alerts.append({
+                'type': 'New Inventory Detected',
+                'priority': 'discovery',
+                'priority_icon': '🆕',
+                'title': f'{len(new_apps)} New Apps Detected',
+                'details': [
+                    f"Top new apps:",
+                    *app_list,
+                    f"Total new inventory: {len(new_apps)} apps"
+                ],
+                'action': 'Review new apps for quality and scaling potential'
+            })
+            record_alert("new_apps_detected", "system")
+    
+    return alerts
+
+def check_lost_inventory():
+    """Alert #22: Apps/bundles that disappeared (were active, now gone)"""
+    alerts = []
+    today_str = get_today()
+    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    # Get yesterday's apps that were making money
+    yesterday_apps = fetch("BUNDLE", ["GROSS_REVENUE"], yesterday_str, yesterday_str)
+    today_apps = fetch("BUNDLE", ["GROSS_REVENUE"], today_str, today_str)
+    
+    # Build today lookup
+    today_bundles = {r.get("BUNDLE", "").strip() for r in today_apps}
+    
+    # Find lost apps
+    lost_apps = []
+    for app in yesterday_apps:
+        bundle = app.get("BUNDLE", "").strip()
+        if not bundle:
+            continue
+        
+        yesterday_rev = sf(app.get("GROSS_REVENUE", 0))
+        
+        # Lost app = was making money yesterday, not in today's data
+        if bundle not in today_bundles and yesterday_rev > DISCOVERIES["lost_app_was_making_min"]:
+            lost_apps.append({
+                'bundle': bundle,
+                'revenue': yesterday_rev
+            })
+    
+    # Alert if we lost inventory
+    if len(lost_apps) >= DISCOVERIES["lost_inventory_count"]:
+        if should_fire_alert("lost_inventory", "system"):
+            # List top 3 by revenue
+            top_lost = sorted(lost_apps, key=lambda x: x['revenue'], reverse=True)[:3]
+            app_list = [f"{a['bundle'][:30]} (was making {format_currency(a['revenue'])})" for a in top_lost]
+            
+            total_lost_rev = sum(a['revenue'] for a in lost_apps)
+            
+            alerts.append({
+                'type': 'Lost Inventory',
+                'priority': 'important',
+                'priority_icon': '📉',
+                'title': f'{len(lost_apps)} Apps Disappeared',
+                'details': [
+                    f"Lost revenue potential: {format_currency(total_lost_rev)}/day",
+                    f"Top lost apps:",
+                    *app_list
+                ],
+                'action': 'Investigate why apps stopped delivering - publisher issue or demand drop'
+            })
+            record_alert("lost_inventory", "system")
+    
+    return alerts
+
 # ============================================================================
 # MAIN ALERT RUNNER
 # ============================================================================
@@ -584,14 +702,17 @@ def run_tier(tier, debug=False):
         all_alerts.extend(check_no_bids())
     
     elif tier == "important":
-        print("[1/3] Checking revenue pacing...")
+        print("[1/4] Checking revenue pacing...")
         all_alerts.extend(check_revenue_below_pace())
         
-        print("[2/3] Checking fill rate...")
+        print("[2/4] Checking fill rate...")
         all_alerts.extend(check_fill_rate_collapse())
         
-        print("[3/3] Checking margin...")
+        print("[3/4] Checking margin...")
         all_alerts.extend(check_margin_compression())
+        
+        print("[4/4] Checking lost inventory...")
+        all_alerts.extend(check_lost_inventory())
     
     elif tier == "opportunities":
         print("[1/3] Checking publisher breakouts...")
@@ -604,8 +725,14 @@ def run_tier(tier, debug=False):
         all_alerts.extend(check_app_explosion())
     
     elif tier == "discoveries":
-        print("[1/1] Checking premium eCPM opportunities...")
+        print("[1/3] Checking premium eCPM opportunities...")
         all_alerts.extend(check_premium_ecpm())
+        
+        print("[2/3] Checking new apps detected...")
+        all_alerts.extend(check_new_apps_detected())
+        
+        print("[3/3] Checking lost inventory...")
+        all_alerts.extend(check_lost_inventory())
     
     # Send alerts
     print(f"\n{'='*60}")

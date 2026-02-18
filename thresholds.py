@@ -73,6 +73,16 @@ DISCOVERIES = {
     
     "payout_spike_multiplier": 2,      # X times normal payout
     "payout_spike_min": 100,           # $ minimum to care
+    
+    # NEW APP/DOMAIN ALERTS
+    "new_app_alert_min": 10,           # Alert if new app made >$10 today
+    "new_domain_alert_min": 10,        # Alert if new domain made >$10 today
+    "new_inventory_count": 5,          # Alert if 5+ new items detected
+    
+    # LOST INVENTORY ALERTS
+    "lost_app_was_making_min": 50,     # Was making >$50/day
+    "lost_app_alert": True,            # Alert when apps disappear
+    "lost_inventory_count": 3,         # Alert if 3+ items disappeared
 }
 
 # ANTI-SPAM SETTINGS
