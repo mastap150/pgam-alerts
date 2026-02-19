@@ -85,10 +85,19 @@ def check_revenue_crash():
     return alerts
 
 def check_publisher_goes_dark():
-    """Alert #2: Top publisher drops to $0"""
+    """Alert #2: Top publisher drops to $0 (only check if day is >50% complete)"""
     alerts = []
+    
+    # Don't check at start of new day
+    now = datetime.now()
+    hour_et = now.hour
+    
+    # Only check between 9 AM - 11 PM ET (after day has meaningful data)
+    if hour_et < 9 or hour_et >= 23:
+        return alerts  # Too early or too late to have complete data
+    
     today_str = get_today()
-    yesterday_str, current_hour = get_yesterday_same_hour()
+    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     
     # Get top publishers from yesterday
     yesterday_pubs = fetch("PUBLISHER", ["GROSS_REVENUE"], yesterday_str, yesterday_str)
@@ -107,7 +116,8 @@ def check_publisher_goes_dark():
         
         today_rev = today_dict.get(pub_name, 0)
         
-        if today_rev == 0 and yesterday_rev > 0:
+        # Only alert if publisher had revenue yesterday but $0 today AND it's past noon
+        if today_rev == 0 and yesterday_rev > 0 and hour_et >= 12:
             if should_fire_alert("publisher_dark", pub_name):
                 alerts.append({
                     'type': 'Publisher Down',
@@ -117,7 +127,7 @@ def check_publisher_goes_dark():
                     'details': [
                         f"{pub_name}",
                         f"Revenue dropped to $0 (was {format_currency(yesterday_rev)}/day)",
-                        f"Check: Endpoint config, floor prices, demand rules"
+                        f"Checked at {hour_et}:00 ET - day is {(hour_et/24)*100:.0f}% complete"
                     ],
                     'action': 'Investigate publisher connection immediately'
                 })
@@ -215,23 +225,34 @@ def check_win_rate_crash():
     return alerts
 
 def check_no_bids():
-    """Alert #5: Top publisher getting 0 bids for 2+ hours"""
+    """Alert #5: Top publisher getting 0 bids (only check after 9 AM ET)"""
     alerts = []
+    
+    # Don't check at start of new day
+    now = datetime.now()
+    hour_et = now.hour
+    
+    # Only check between 9 AM - 11 PM ET
+    if hour_et < 9 or hour_et >= 23:
+        return alerts  # Too early or too late - data incomplete
+    
     today_str = get_today()
     
-    # Get hourly publisher data for last few hours
-    now = datetime.now()
-    two_hours_ago = now - timedelta(hours=2)
-    
     # Get top publishers
-    top_pubs = fetch("PUBLISHER", ["GROSS_REVENUE", "BIDS"], today_str, today_str)
+    top_pubs = fetch("PUBLISHER", ["GROSS_REVENUE", "BIDS", "OPPORTUNITIES"], today_str, today_str)
     top_pubs_sorted = sorted(top_pubs, key=lambda x: sf(x.get("GROSS_REVENUE", 0)), reverse=True)[:CRITICAL["no_bids_rank"]]
     
     for pub in top_pubs_sorted:
         pub_name = pub.get("PUBLISHER_NAME", "").strip()
         bids = sf(pub.get("BIDS", 0))
+        opps = sf(pub.get("OPPORTUNITIES", 0))
+        revenue = sf(pub.get("GROSS_REVENUE", 0))
         
-        if bids == 0:
+        # Only alert if:
+        # 1. Getting opportunities (so publisher is active)
+        # 2. Zero bids
+        # 3. Past noon (enough time for bids to come in)
+        if bids == 0 and opps > 10000 and hour_et >= 12:
             if should_fire_alert("no_bids", pub_name):
                 alerts.append({
                     'type': 'No Bids',
@@ -240,7 +261,8 @@ def check_no_bids():
                     'title': f'Zero Bids: {pub_name}',
                     'details': [
                         f"{pub_name} receiving 0 bids",
-                        f"Check: Floor prices, demand partner rules, endpoint config"
+                        f"Has {format_currency(opps)} opportunities but no bids",
+                        f"Checked at {hour_et}:00 ET"
                     ],
                     'action': 'Review floor prices and demand connectivity'
                 })
@@ -677,6 +699,17 @@ def run_tier(tier, debug=False):
         print(f"  🧪 DEBUG MODE - Alerts will NOT be sent to Slack")
     print(f"  {datetime.now().strftime('%Y-%m-%d %I:%M %p ET')}")
     print(f"{'='*60}\n")
+    
+    # Check operating hours for critical tier
+    current_hour = datetime.now().hour
+    
+    # Skip critical alerts between 11 PM - 9 AM ET (midnight UTC transition period)
+    if tier == "critical" and (current_hour >= 23 or current_hour < 9):
+        print(f"⏸️  Outside operating hours ({current_hour}:00 ET)")
+        print(f"   Critical alerts only run 9 AM - 11 PM ET to avoid false positives")
+        print(f"   (Midnight UTC = 7 PM ET causes API data resets)")
+        print(f"\n{'='*60}\n")
+        return
     
     # Cleanup old history
     cleaned = cleanup_old_history(days=7)
