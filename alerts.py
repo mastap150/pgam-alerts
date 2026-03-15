@@ -126,6 +126,60 @@ def check_dsp_dropped_out(date_str: str) -> list:
 
 # ── Domain Dropout ────────────────────────────────────────────────────────────
 
+def get_domain_context(domain: str, from_date: str, to_date: str) -> dict:
+    """
+    Fetch which DSPs and SSPs were associated with this domain last week.
+    Returns top DSP name, top SSP name, and avg margin.
+    """
+    context = {"top_dsp": None, "top_ssp": None, "margin": None}
+    try:
+        # Top DSP for this domain
+        dsp_rows = fetch("DSP_NAME,DOMAIN", ["DSP_SPEND", "SSP_REVENUE"],
+                         from_date, to_date)
+        dsp_totals = defaultdict(float)
+        total_spend = 0
+        total_ssp   = 0
+        for r in dsp_rows:
+            if r.get("DOMAIN", "").strip() != domain:
+                continue
+            dsp   = r.get("DSP_NAME", "").strip()
+            spend = sf(r.get("DSP_SPEND", 0))
+            ssp   = sf(r.get("SSP_REVENUE", 0))
+            if dsp:
+                dsp_totals[dsp] += spend
+            total_spend += spend
+            total_ssp   += ssp
+
+        if dsp_totals:
+            context["top_dsp"] = max(dsp_totals, key=dsp_totals.get)
+
+        if total_spend > 0:
+            true_net = (total_spend * 0.92) - total_ssp
+            context["margin"] = true_net / total_spend * 100
+
+    except Exception:
+        pass
+
+    try:
+        # Top SSP for this domain
+        ssp_rows = fetch("SSP_NAME,DOMAIN", ["DSP_SPEND"],
+                         from_date, to_date)
+        ssp_totals = defaultdict(float)
+        for r in ssp_rows:
+            if r.get("DOMAIN", "").strip() != domain:
+                continue
+            ssp   = r.get("SSP_NAME", "").strip()
+            spend = sf(r.get("DSP_SPEND", 0))
+            if ssp:
+                ssp_totals[ssp] += spend
+        if ssp_totals:
+            context["top_ssp"] = max(ssp_totals, key=ssp_totals.get)
+    except Exception:
+        pass
+
+    return context
+
+
 def check_domain_dropped(date_str: str) -> list:
     alerts = []
 
@@ -153,21 +207,24 @@ def check_domain_dropped(date_str: str) -> list:
     top_20 = sorted(domain_totals.items(), key=lambda x: x[1], reverse=True)[:20]
 
     for domain, last_week_total in top_20:
-        daily_avg    = last_week_total / 7
-        today_spend  = today_domains.get(domain, 0)
+        daily_avg   = last_week_total / 7
+        today_spend = today_domains.get(domain, 0)
 
-        # Only alert if:
-        # - Domain averaged >$50/day last week (was material)
-        # - Today has $0
-        # - Not already alerted today
-        if daily_avg > 50 and today_spend == 0:
+        # Raised threshold: >$20/day avg (was $50 total but $1-2 domains kept firing)
+        # Today must be $0 and not already alerted
+        if daily_avg > 20 and today_spend == 0:
             alert_key = f"domain_dropped_{domain}"
             if not already_alerted_today(alert_key):
+                # Enrich with SSP/DSP context from last week
+                context = get_domain_context(domain, seven_days_ago, yesterday)
                 alerts.append({
-                    "type":        "domain_dropped",
-                    "domain":      domain,
-                    "daily_avg":   daily_avg,
-                    "severity":    "high" if daily_avg > 100 else "medium",
+                    "type":      "domain_dropped",
+                    "domain":    domain,
+                    "daily_avg": daily_avg,
+                    "top_dsp":   context.get("top_dsp"),
+                    "top_ssp":   context.get("top_ssp"),
+                    "margin":    context.get("margin"),
+                    "severity":  "high" if daily_avg > 100 else "medium",
                 })
                 mark_alerted(alert_key)
 
@@ -250,10 +307,22 @@ def format_alert_message(alert: dict) -> str:
         )
 
     elif alert["type"] == "domain_dropped":
-        sev = "🔴" if alert["severity"] == "high" else "🟡"
+        sev      = "🔴" if alert["severity"] == "high" else "🟡"
+        top_dsp  = alert.get("top_dsp")
+        top_ssp  = alert.get("top_ssp")
+        margin   = alert.get("margin")
+        context_lines = []
+        if top_dsp:
+            context_lines.append(f"Top DSP last week: *{top_dsp}*")
+        if top_ssp:
+            context_lines.append(f"Top SSP last week: *{top_ssp}*")
+        if margin is not None:
+            context_lines.append(f"Avg margin: *{margin:.1f}%*")
+        context_str = " | ".join(context_lines) if context_lines else "No context available"
         return (
             f"{sev} *Top Domain Dropped — {alert['domain']}*\n"
             f"Avg ${alert['daily_avg']:,.0f}/day last week | Today: $0\n"
+            f"{context_str}\n"
             f"Check if intentionally removed or supply issue."
         )
 
