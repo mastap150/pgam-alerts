@@ -146,8 +146,8 @@ def build_slack_payload(today: dict, yesterday: dict, hourly_today: list,
 
     if api_reset:
         display = yesterday
-        label   = f"Yesterday final — {yest_str}"
-        note    = "\n_⚠️ Showing yesterday's completed day (API resets 8pm ET)_"
+        label   = f"Completed Day — {yest_str}"
+        note    = "\n_ℹ️ LL API resets at 8pm ET — these are the final numbers for yesterday_"
         expected_pacing = 1.0
     else:
         display = today
